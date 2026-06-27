@@ -82,3 +82,31 @@ This project is open source and available under the MIT License.
 
 - FastLED Library for LED control
 - ESPAsyncWebServer for the web interface
+
+## OTA Updates (Phase 4)
+
+After the initial USB flash, firmware can be updated over WiFi.
+
+### First flash (USB)
+```bash
+pio run -e esp32dev -t upload
+```
+
+### Subsequent updates (OTA)
+```bash
+pio run -e esp32dev_ota -t upload
+```
+
+The device must be on your WiFi network. It advertises as `pixelboard.local` via mDNS.
+
+**OTA visual feedback on the matrix:**
+- Upload starts: 3 cyan pixels top-left
+- Progress: green bar sweeping across row 7 (0-16 pixels)
+- Success: full green flash → white flash → black
+- Error: red flash
+
+### Notes
+- OTA only works in STA mode (connected to your network). AP/onboarding mode does not support OTA.
+- The `min_spiffs.csv` partition table is required for OTA — it creates two app partitions (~960KB each) at the cost of slightly reduced SPIFFS space (~960KB vs ~1.4MB).
+- If a bad flash bricks the device, reflash via USB.
+- To add a password: uncomment `ArduinoOTA.setPassword("pixelboard")` in `PixelWifiServer.cpp` and add `upload_flags = --auth=pixelboard` to `platformio.ini`.

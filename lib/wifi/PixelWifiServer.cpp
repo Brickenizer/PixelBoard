@@ -13,6 +13,7 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
+#include <ArduinoOTA.h>        // OTA update support
 #include "patterns.h"          // For g_patternList, PATTERN_COUNT, etc.
 #include "draw/draw.h"         // For setupDrawHandler
 #include "video/video.h"       // For setupVideoPlayer
@@ -23,10 +24,14 @@
 #include "sprites/spriteplay.h"// For spriteplaySetup
 #include "SPIFFS.h"
 #include "tetris/tetris.h"    // Add Tetris setup declaration
+#include <FastLED.h>           // For OTA progress bar
 
 #if ENABLE_MICROPHONE
 #include "audio/audio.h"      // Add audio pattern header
 #endif
+
+// LED array reference for OTA progress bar
+extern CRGB leds[];
 
 // -------------------------------------------------------------------
 // Global AsyncWebServer for "normal" operation on port 80
@@ -272,6 +277,73 @@ static void connectToWiFi() {
 // -------------------------------------------------------------------
 // Setup mDNS so we can use e.g. http://pixelboard.local
 // -------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// OTA setup — call after WiFi connects (STA mode only)
+// ---------------------------------------------------------------------------
+static void setupOTA() {
+    ArduinoOTA.setHostname("pixelboard");
+    // Uncomment to require a password:
+    // ArduinoOTA.setPassword("pixelboard");
+
+    ArduinoOTA.onStart([]() {
+        String type = (ArduinoOTA.getCommand()==U_FLASH) ? "firmware" : "filesystem";
+        Serial.println("[OTA] Starting update: " + type);
+        // Clear display and show OTA indicator
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        // Show "OTA" in top-left using 3 bright pixels as a simple indicator
+        leds[0] = CRGB::Cyan;
+        leds[1] = CRGB::Cyan;
+        leds[2] = CRGB::Cyan;
+        FastLED.show();
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        uint8_t pct = (uint8_t)((progress * 16) / total); // 0-16 pixels
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        // Progress bar on row 7 (center of display, same as lane center)
+        for (uint8_t x = 0; x < 16; x++) {
+            if (x < pct)
+                leds[XY(x, 7)] = CRGB::Green;
+            else if (x == pct)
+                leds[XY(x, 7)] = CRGB(0, 80, 0); // dim leading edge
+        }
+        // Show percentage in top rows as a dim number (optional)
+        FastLED.show();
+        Serial.printf("[OTA] Progress: %u%%\r", (progress / (total / 100)));
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\n[OTA] Complete — rebooting");
+        // Flash full green then white to signal success
+        fill_solid(leds, NUM_LEDS, CRGB::Green);
+        FastLED.show();
+        delay(300);
+        fill_solid(leds, NUM_LEDS, CRGB::White);
+        FastLED.show();
+        delay(200);
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        FastLED.show();
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("[OTA] Error[%u]: ", error);
+        if      (error==OTA_AUTH_ERROR)    Serial.println("Auth failed");
+        else if (error==OTA_BEGIN_ERROR)   Serial.println("Begin failed");
+        else if (error==OTA_CONNECT_ERROR) Serial.println("Connect failed");
+        else if (error==OTA_RECEIVE_ERROR) Serial.println("Receive failed");
+        else if (error==OTA_END_ERROR)     Serial.println("End failed");
+        // Flash red to signal error
+        fill_solid(leds, NUM_LEDS, CRGB::Red);
+        FastLED.show();
+        delay(500);
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        FastLED.show();
+    });
+
+    ArduinoOTA.begin();
+    Serial.println("[OTA] Ready — hostname: pixelboard");
+}
+
 static void setupMDNS() {
   if (MDNS.begin("pixelboard")) {
     Serial.println("[mDNS] Responder started: http://pixelboard.local");
@@ -1398,7 +1470,7 @@ body {
 
 static void setupStyleHandler() {
   server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request) {
-    AsyncWebServerResponse *response = request->beginResponse_P(
+    AsyncWebServerResponse *response = request->beginResponse(
         200, "text/css", (const uint8_t*)STYLE_CSS, sizeof(STYLE_CSS) - 1);
     response->addHeader("Cache-Control", "public, max-age=31536000");
     request->send(response);
@@ -1537,6 +1609,7 @@ void pixelwifiServerSetup() {
   // If we have a successful STA connection, serve normal pages:
   if (WiFi.status() == WL_CONNECTED) {
     setupMDNS();
+    setupOTA();
     setupHomePage();
     setupPatternHandler();
     setupBrightnessHandler();
@@ -1582,5 +1655,6 @@ void pixelwifiServerSetup() {
 // Typically empty, but you can place background tasks here if needed.
 // -------------------------------------------------------------------
 void pixelwifiLoop() {
-  // No-op for now
+    // Handle OTA update requests (no-op if OTA not initialized i.e. AP mode)
+    ArduinoOTA.handle();
 }

@@ -128,6 +128,9 @@ void setup() {
 
 void loop()
 {
+  // Handle OTA and other WiFi background tasks
+  pixelwifiLoop();
+
   // Call the function pointer from the struct
   g_patternList[g_current_pattern_number].func(leds);
 
