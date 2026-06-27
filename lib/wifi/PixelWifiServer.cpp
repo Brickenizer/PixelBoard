@@ -14,6 +14,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>        // OTA update support
+#include <Update.h>            // Web-based OTA (HTTP upload)
 #include "patterns.h"          // For g_patternList, PATTERN_COUNT, etc.
 #include "draw/draw.h"         // For setupDrawHandler
 #include "video/video.h"       // For setupVideoPlayer
@@ -79,6 +80,7 @@ static void setupBrightnessHandler();
 static void setupSpeedHandler();
 static void setupPixelStatusHandler();
 static void setupFaviconHandler();  // Add favicon handler declaration
+static void setupWebOTA();          // Web-based OTA upload page
 static void startServer();
 static void savePreviewInterval(int interval);
 
@@ -468,6 +470,7 @@ static void setupHomePage() {
               <div style="display:flex;flex-direction:column;gap:8px;">
                 <a href="/pacman/ui" target="_blank" style="color:#61dafb;">&#x1F47E; Pac-Man Chase Settings</a>
                 <a href="/sprites/ui" target="_blank" style="color:#61dafb;">&#x1F5BC;&#xFE0F; Sprite Animator Settings</a>
+                <a href="/update" target="_blank" style="color:#f39c12;">&#x1F4E1; Firmware Update (OTA)</a>
               </div>
             </div>
           </div>
@@ -1468,6 +1471,181 @@ body {
   }
 )css";
 
+// ---------------------------------------------------------------------------
+// Web-based OTA update — upload firmware .bin via browser
+// UI at /update  —  POST to /update/firmware
+// No PlatformIO required for the upload step; just build the .bin and browse.
+// ---------------------------------------------------------------------------
+static void setupWebOTA() {
+    // Serve the upload UI
+    server.on("/update", HTTP_GET, [](AsyncWebServerRequest* req) {
+        String html = R"html(
+<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PixelBoard OTA Update</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  .drop-zone{border:2px dashed #61dafb;border-radius:8px;padding:32px;
+             text-align:center;cursor:pointer;margin:16px 0;color:#61dafb}
+  .drop-zone.over{background:#1a2a3a}
+  progress{width:100%;height:20px;border-radius:4px;margin-top:12px}
+  #status{margin-top:12px;font-size:.95em;min-height:1.5em}
+  .btn{background:#61dafb;color:#282c34;border:none;padding:10px 28px;
+       border-radius:4px;font-size:1em;font-weight:bold;cursor:pointer;margin-top:8px}
+  .btn:disabled{background:#444;color:#888;cursor:not-allowed}
+  .warn{color:#f39c12;font-size:.85em;margin-top:8px}
+</style>
+</head><body>
+<h2>&#x1F4E1; PixelBoard Firmware Update</h2>
+<p>Select or drop a <code>.bin</code> firmware file to update over WiFi.</p>
+<p class="warn">&#x26A0;&#xFE0F; Do not power off during upload. The device will reboot automatically when complete.</p>
+
+<div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+  <div>&#x1F4C2; Click or drop <code>.bin</code> file here</div>
+  <div id="fileName" style="margin-top:8px;color:#aaa;font-size:.85em"></div>
+</div>
+<input type="file" id="fileInput" accept=".bin" style="display:none">
+<progress id="progress" value="0" max="100" style="display:none"></progress>
+<div id="status"></div>
+<button class="btn" id="uploadBtn" onclick="startUpload()" disabled>Upload Firmware</button>
+
+<script>
+let file = null;
+const dz = document.getElementById('dropZone');
+const fi = document.getElementById('fileInput');
+const btn = document.getElementById('uploadBtn');
+const prog = document.getElementById('progress');
+const stat = document.getElementById('status');
+
+fi.onchange = e => setFile(e.target.files[0]);
+dz.ondragover = e => { e.preventDefault(); dz.classList.add('over'); };
+dz.ondragleave = () => dz.classList.remove('over');
+dz.ondrop = e => { e.preventDefault(); dz.classList.remove('over'); setFile(e.dataTransfer.files[0]); };
+
+function setFile(f) {
+  if (!f || !f.name.endsWith('.bin')) { stat.textContent='Please select a .bin file.'; return; }
+  file = f;
+  document.getElementById('fileName').textContent = f.name + ' (' + (f.size/1024).toFixed(1) + ' KB)';
+  btn.disabled = false;
+  stat.textContent = '';
+}
+
+async function startUpload() {
+  if (!file) return;
+  btn.disabled = true;
+  prog.style.display = 'block';
+  prog.value = 0;
+  stat.textContent = 'Uploading...';
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/update/firmware', true);
+
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const pct = Math.round(e.loaded/e.total*100);
+      prog.value = pct;
+      stat.textContent = 'Uploading: ' + pct + '%';
+    }
+  };
+
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      prog.value = 100;
+      stat.innerHTML = '&#x2705; Upload complete! Device is rebooting&hellip;';
+      setTimeout(() => { stat.innerHTML += '<br>Reconnecting in 5s&hellip;'; }, 2000);
+      setTimeout(() => window.location.href='/', 7000);
+    } else {
+      stat.textContent = '&#x274C; Upload failed: ' + xhr.responseText;
+      btn.disabled = false;
+    }
+  };
+
+  xhr.onerror = () => {
+    stat.textContent = '&#x274C; Connection error — check device is reachable.';
+    btn.disabled = false;
+  };
+
+  const form = new FormData();
+  form.append('firmware', file);
+  xhr.send(form);
+}
+</script>
+</body></html>)html";
+        req->send(200, "text/html", html);
+    });
+
+    // Handle firmware upload POST
+    server.on("/update/firmware", HTTP_POST,
+        // Response sent after upload completes
+        [](AsyncWebServerRequest* req) {
+            bool ok = !Update.hasError();
+            AsyncWebServerResponse* res = req->beginResponse(
+                ok ? 200 : 500, "text/plain",
+                ok ? "OK" : Update.errorString());
+            res->addHeader("Connection", "close");
+            req->send(res);
+            if (ok) {
+                delay(100);
+                ESP.restart();
+            }
+        },
+        // Upload handler — called for each chunk
+        [](AsyncWebServerRequest* req, const String& filename,
+           size_t index, uint8_t* data, size_t len, bool final)
+        {
+            if (index == 0) {
+                Serial.printf("[WebOTA] Receiving: %s\n", filename.c_str());
+                // Show progress bar row starting state on matrix
+                fill_solid(leds, NUM_LEDS, CRGB::Black);
+                leds[XY(0,7)] = CRGB::Cyan;
+                FastLED.show();
+
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+                    Serial.println("[WebOTA] Begin failed: " + String(Update.errorString()));
+                }
+            }
+
+            if (Update.isRunning()) {
+                Update.write(data, len);
+
+                // Update progress bar on matrix
+                size_t written = Update.progress();
+                size_t total   = Update.size();
+                if (total > 0) {
+                    uint8_t bars = (uint8_t)((written * 16) / total);
+                    fill_solid(leds, NUM_LEDS, CRGB::Black);
+                    for (uint8_t x=0; x<16; x++) {
+                        if (x < bars)       leds[XY(x,7)] = CRGB::Green;
+                        else if (x == bars) leds[XY(x,7)] = CRGB(0,60,0);
+                    }
+                    FastLED.show();
+                }
+            }
+
+            if (final) {
+                if (Update.end(true)) {
+                    Serial.printf("[WebOTA] Complete: %u bytes\n", index+len);
+                    fill_solid(leds, NUM_LEDS, CRGB::Green);
+                    FastLED.show();
+                    delay(300);
+                    fill_solid(leds, NUM_LEDS, CRGB::White);
+                    FastLED.show();
+                    delay(200);
+                    fill_solid(leds, NUM_LEDS, CRGB::Black);
+                    FastLED.show();
+                } else {
+                    Serial.println("[WebOTA] End failed: " + String(Update.errorString()));
+                    fill_solid(leds, NUM_LEDS, CRGB::Red);
+                    FastLED.show();
+                    delay(500);
+                    fill_solid(leds, NUM_LEDS, CRGB::Black);
+                    FastLED.show();
+                }
+            }
+        }
+    );
+}
+
 static void setupStyleHandler() {
   server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request) {
     AsyncWebServerResponse *response = request->beginResponse(
@@ -1576,6 +1754,7 @@ static void startServer() {
   setupPreviewIntervalHandler();
   setupStyleHandler();
   setupFaviconHandler();
+  setupWebOTA();
 
   // Setup pattern-specific handlers
   setupDrawPattern(&server);
