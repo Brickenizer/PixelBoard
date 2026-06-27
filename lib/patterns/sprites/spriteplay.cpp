@@ -312,6 +312,7 @@ void spriteplaySetup(AsyncWebServer* server) {
   <div id="status"></div>
   <button class="btn" id="uploadBtn" onclick="startUpload()" disabled>Upload</button>
   <button class="btn danger" onclick="clearAll()">&#x1F5D1; Clear all frames</button>
+  <button class="btn" onclick="downloadAll()">&#x2B07; Download all</button>
 </div>
 
 <div class="section">
@@ -391,6 +392,23 @@ async function setDelay() {
   stat.textContent = 'Frame delay set to ' + v + 'ms';
 }
 
+async function downloadAll() {
+  const r = await fetch('/sprites/data');
+  const d = await r.json();
+  if (d.frameCount === 0) { stat.textContent = 'No frames to download.'; return; }
+  stat.textContent = 'Downloading ' + d.frameCount + ' frame(s)...';
+  for (const f of d.frames) {
+    const a = document.createElement('a');
+    a.href = f.url;
+    a.download = 'frame_' + String(f.idx).padStart(2,'0') + '.ppm';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    await new Promise(r => setTimeout(r, 300)); // small delay between downloads
+  }
+  stat.textContent = 'Done! Check your Downloads folder.';
+}
+
 async function loadFrames() {
   const r = await fetch('/sprites/data');
   const d = await r.json();
@@ -405,6 +423,8 @@ async function loadFrames() {
     <div class="frame-card">
       <img src="${f.url}?t=${Date.now()}" alt="Frame ${f.idx}">
       <div style="font-size:.8em;color:#aaa">Frame ${f.idx}</div>
+      <a href="${f.url}" download="frame_${String(f.idx).padStart(2,'0')}.ppm"
+         style="font-size:.75em;color:#61dafb;text-decoration:none">&#x2B07; save</a>
     </div>`).join('');
 }
 

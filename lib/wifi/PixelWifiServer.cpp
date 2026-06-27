@@ -1824,6 +1824,9 @@ void pixelwifiServerSetup() {
 
     // Serve static files with error handling
     server.serveStatic("/static/", SPIFFS, "/").setDefaultFile("index.html").setCacheControl("max-age=600");
+
+    // Serve sprite PPM files directly for download and thumbnail preview
+    server.serveStatic("/sprites/", SPIFFS, "/sprites/").setCacheControl("no-cache");
   } else {
     Serial.println("[WiFi] Running in AP mode for onboarding.");
   }
