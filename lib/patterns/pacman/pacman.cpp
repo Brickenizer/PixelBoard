@@ -635,18 +635,38 @@ static Arm choosePacExit(Actor& pac) {
     Arm exits[4]; uint8_t n=getExitArms(pac,exits);
     if(n==0) return armOpposite(pac.currentArm);
     if(n==1) return exits[0];
-    // Flee hunters
+
+    // Find nearest hunter
     float nearestHunter=999.f; Arm hunterArm=ARM_NONE;
     for(uint8_t i=0;i<g_numActors;i++) {
         Actor& a=g_actors[i]; if(!a.active||a.role!=ROLE_HUNTER) continue;
         float d=fabsf(pac.pos-a.pos);
         if(d<nearestHunter){nearestHunter=d;hunterArm=a.currentArm;}
     }
-    if(nearestHunter<15.f&&!g_powerActive) {
+
+    if(g_powerActive) {
+        // Power pellet active — Pac-Man hunts frightened ghosts!
+        if(hunterArm!=ARM_NONE)
+            for(uint8_t i=0;i<n;i++) if(exits[i]==hunterArm) return exits[i];
+        // No hunter on reachable arm — chase nearest prey
+        float nearestPrey=999.f; Arm preyArm=ARM_NONE;
+        for(uint8_t i=0;i<g_numActors;i++) {
+            Actor& a=g_actors[i]; if(!a.active||a.role!=ROLE_PREY) continue;
+            float d=fabsf(pac.pos-a.pos);
+            if(d<nearestPrey){nearestPrey=d;preyArm=a.currentArm;}
+        }
+        if(preyArm!=ARM_NONE)
+            for(uint8_t i=0;i<n;i++) if(exits[i]==preyArm) return exits[i];
+        return exits[random(n)];
+    }
+
+    // Normal — flee hunters
+    if(nearestHunter<15.f) {
         for(uint8_t i=0;i<n;i++) if(exits[i]!=hunterArm) return exits[i];
         return exits[0];
     }
-    // Chase prey
+
+    // Chase prey in pac-chases mode
     if(g_pac.chaseMode==0) {
         float nearestPrey=999.f; Arm preyArm=ARM_NONE;
         for(uint8_t i=0;i<g_numActors;i++) {
@@ -657,9 +677,9 @@ static Arm choosePacExit(Actor& pac) {
         if(preyArm!=ARM_NONE)
             for(uint8_t i=0;i<n;i++) if(exits[i]==preyArm) return exits[i];
     }
+
     return exits[random(n)];
 }
-
 static Arm chooseHunterExit(Actor& actor) {
     Arm exits[4]; uint8_t n=getExitArms(actor,exits);
     if(n==0) return armOpposite(actor.currentArm);
@@ -1121,14 +1141,15 @@ static void drawChase(CRGB* leds) {
         if(!a.active) continue;
 
         if(a.role==ROLE_STATIC) {
-            // Check if Pac-Man overlaps
-            bool sameArm = (a.currentArm==g_pacman.currentArm);
-            bool sameH   = (a.horizontal==g_pacman.horizontal);
-            float dist   = fabsf(g_pacman.pos - a.staticPos);
-            if((sameArm||sameH) && dist<5.0f) {
-                int16_t px=a.horizontal?(int16_t)a.staticPos+4:LANE_ORIGIN+4;
-                int16_t py=a.horizontal?LANE_ORIGIN:(int16_t)a.staticPos+4;
-                triggerPopup(a.scoreText,px,py);
+            // Compute actual screen position of static item and Pac-Man
+            // Static items sit at a fixed pos on their arm's center lane row/col
+            int16_t sx = a.horizontal ? (int16_t)a.staticPos : LANE_ORIGIN;
+            int16_t sy = a.horizontal ? LANE_ORIGIN           : (int16_t)a.staticPos;
+            int16_t px = g_pacman.horizontal ? (int16_t)g_pacman.pos : LANE_ORIGIN;
+            int16_t py = g_pacman.horizontal ? LANE_ORIGIN            : (int16_t)g_pacman.pos;
+            // Eaten if Pac-Man's screen position is within 5px on both axes
+            if(abs(px-sx)<5 && abs(py-sy)<5) {
+                triggerPopup(a.scoreText, sx+4, sy);
                 a.active=false;
                 continue;
             }

@@ -1,15 +1,14 @@
 // ---------------------------------------------------------------------------
 // spriteplay.cpp — Upload and animate user-defined 16x16 PPM sprite sequences
 //
-// PPM format expected: P6 binary, 16x16, maxval 255.
-// PGM format expected: P5 binary, 16x16, maxval 255 (optional alpha mask).
-// Files stored in SPIFFS: /sprites/frame_00.ppm .. /sprites/frame_15.ppm
-//                          /sprites/frame_00.pgm .. /sprites/frame_15.pgm
-// Settings (frameDelay, frameCount) stored in NVS.
+// Files stored in SPIFFS as /sprites/frame_00.ppm .. /sprites/frame_15.ppm
+// Upload multiple PPMs at once via the web UI — sorted by filename, played
+// in order. No PGM masks — transparent backgrounds via black pixels.
+//
+// Settings (frameDelay, frameCount) persisted in NVS via Preferences.
 // ---------------------------------------------------------------------------
 
 #include "spriteplay.h"
-#include "sprite_render.h"
 #include "led_display.h"
 #include <FastLED.h>
 #include <SPIFFS.h>
@@ -17,26 +16,25 @@
 #include <ESPAsyncWebServer.h>
 #include <Arduino.h>
 
-static const uint8_t  MAX_FRAMES   = 16;
-static const uint16_t SPRITE_W     = 16;
-static const uint16_t SPRITE_H     = 16;
-static const uint16_t PIXELS       = SPRITE_W * SPRITE_H; // 256
+static const uint8_t  MAX_FRAMES = 16;
+static const uint16_t SPRITE_W   = 16;
+static const uint16_t SPRITE_H   = 16;
+static const uint16_t PIXELS     = SPRITE_W * SPRITE_H; // 256
 
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
-static uint16_t g_frameDelay  = 100;   // ms per frame
-static uint8_t  g_frameCount  = 0;     // how many frames are stored
+static uint16_t g_frameDelay  = 150;
+static uint8_t  g_frameCount  = 0;
 static bool     g_initialized = false;
 
 static void loadSpriteSettings() {
     Preferences p;
     p.begin("spriteplay", true);
-    g_frameDelay = p.getUShort("delay", 100);
+    g_frameDelay = p.getUShort("delay",  150);
     g_frameCount = p.getUChar ("frames", 0);
     p.end();
 }
-
 static void saveSpriteSettings() {
     Preferences p;
     p.begin("spriteplay", false);
@@ -45,105 +43,84 @@ static void saveSpriteSettings() {
     p.end();
 }
 
-// ---------------------------------------------------------------------------
-// PPM/PGM parser
-// Reads a P6 (PPM) or P5 (PGM) binary file from SPIFFS.
-// Skips the ASCII header (handles comment lines starting with #).
-// Returns true on success. outBuf must be PIXELS*3 bytes (PPM) or PIXELS (PGM).
-// ---------------------------------------------------------------------------
-static bool parsePNM(const char* path, uint8_t* outBuf, size_t outLen,
-                     char expectedType)   // '6' for PPM, '5' for PGM
-{
-    File f = SPIFFS.open(path, "r");
-    if (!f) return false;
-
-    // Read magic "P5" or "P6"
-    char magic[3] = {0};
-    f.read((uint8_t*)magic, 2);
-    if (magic[0] != 'P' || magic[1] != ('0' + expectedType)) {
-        f.close(); return false;
+// Scan SPIFFS and count how many frame_xx.ppm files actually exist
+static uint8_t countFrames() {
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < MAX_FRAMES; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), "/sprites/frame_%02d.ppm", i);
+        if (SPIFFS.exists(path)) n = i + 1;
+        else break;
     }
-
-    // Parse header tokens (width, height, maxval) skipping whitespace/comments
-    auto skipWS = [&]() {
-        while (f.available()) {
-            char c = (char)f.peek();
-            if (c == '#') {
-                while (f.available() && (char)f.read() != '\n') {}
-            } else if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-                f.read();
-            } else break;
-        }
-    };
-    auto readInt = [&]() -> int {
-        skipWS();
-        int val = 0;
-        while (f.available()) {
-            char c = (char)f.peek();
-            if (c < '0' || c > '9') break;
-            val = val * 10 + (f.read() - '0');
-        }
-        return val;
-    };
-
-    int w      = readInt();
-    int h      = readInt();
-    int maxval = readInt();
-    // Consume exactly one whitespace after maxval (spec requires it)
-    if (f.available()) f.read();
-
-    if (w != SPRITE_W || h != SPRITE_H || maxval != 255) {
-        Serial.printf("[Sprite] %s: expected %dx%d/255, got %dx%d/%d\n",
-                      path, SPRITE_W, SPRITE_H, w, h, maxval);
-        f.close(); return false;
-    }
-
-    size_t got = f.read(outBuf, outLen);
-    f.close();
-    return (got == outLen);
+    return n;
 }
 
 // ---------------------------------------------------------------------------
-// Render one frame onto the LED array.
-// Loads PPM (and optional PGM) from SPIFFS each call — small enough to be fast.
-// For a production version you could cache in PSRAM if available.
+// PPM parser (P6 binary, 16x16, maxval 255)
+// ---------------------------------------------------------------------------
+static bool parsePPM(const char* path, uint8_t* rgbBuf) {
+    File f = SPIFFS.open(path, "r");
+    if (!f) return false;
+
+    // Read and validate magic
+    char magic[3] = {0};
+    f.read((uint8_t*)magic, 2);
+    if (magic[0] != 'P' || magic[1] != '6') { f.close(); return false; }
+
+    // Skip whitespace/comments, read integers
+    auto skipWS = [&]() {
+        while (f.available()) {
+            char c = (char)f.peek();
+            if (c == '#') { while (f.available() && (char)f.read() != '\n') {} }
+            else if (c==' '||c=='\t'||c=='\r'||c=='\n') f.read();
+            else break;
+        }
+    };
+    auto readInt = [&]() -> int {
+        skipWS(); int v=0;
+        while (f.available()) {
+            char c=(char)f.peek();
+            if (c<'0'||c>'9') break;
+            v = v*10 + (f.read()-'0');
+        }
+        return v;
+    };
+
+    int w=readInt(), h=readInt(), maxval=readInt();
+    if (f.available()) f.read(); // consume single whitespace after maxval
+
+    if (w!=SPRITE_W || h!=SPRITE_H || maxval!=255) {
+        Serial.printf("[Sprite] %s: bad size %dx%d or maxval %d\n",path,w,h,maxval);
+        f.close(); return false;
+    }
+
+    size_t got = f.read(rgbBuf, PIXELS*3);
+    f.close();
+    return (got == PIXELS*3);
+}
+
+// ---------------------------------------------------------------------------
+// Render one frame onto the LED array
 // ---------------------------------------------------------------------------
 static void renderFrame(CRGB* leds, uint8_t frameIdx) {
-    char ppmPath[32], pgmPath[32];
-    snprintf(ppmPath, sizeof(ppmPath), "/sprites/frame_%02d.ppm", frameIdx);
-    snprintf(pgmPath, sizeof(pgmPath), "/sprites/frame_%02d.pgm", frameIdx);
+    char path[32];
+    snprintf(path, sizeof(path), "/sprites/frame_%02d.ppm", frameIdx);
 
-    static uint8_t rgbBuf[PIXELS * 3];  // 768 bytes
-    static uint8_t alphaBuf[PIXELS];    // 256 bytes
+    static uint8_t rgbBuf[PIXELS * 3];
 
-    if (!parsePNM(ppmPath, rgbBuf, sizeof(rgbBuf), '6')) {
-        // Frame missing or corrupt — show a magenta error pixel at top-left
+    if (!parsePPM(path, rgbBuf)) {
         fill_solid(leds, NUM_LEDS, CRGB::Black);
-        leds[XY(0, 0)] = CRGB::Magenta;
+        leds[XY(0,0)] = CRGB::Magenta; // error indicator
         return;
     }
 
-    bool hasAlpha = parsePNM(pgmPath, alphaBuf, sizeof(alphaBuf), '5');
-
-    for (uint16_t i = 0; i < PIXELS; i++) {
-        uint8_t r = rgbBuf[i * 3 + 0];
-        uint8_t g = rgbBuf[i * 3 + 1];
-        uint8_t b = rgbBuf[i * 3 + 2];
-        uint8_t a = hasAlpha ? alphaBuf[i] : 255;
-
-        uint8_t px = i % SPRITE_W;
-        uint8_t py = i / SPRITE_W;
-        int     idx = XY(px, py);
-
-        if (a == 0) {
-            leds[idx] = CRGB::Black;
-        } else if (a == 255) {
-            leds[idx] = CRGB(r, g, b);
-        } else {
-            uint8_t inv = 255 - a;
-            leds[idx].r = ((uint16_t)r * a + (uint16_t)leds[idx].r * inv) >> 8;
-            leds[idx].g = ((uint16_t)g * a + (uint16_t)leds[idx].g * inv) >> 8;
-            leds[idx].b = ((uint16_t)b * a + (uint16_t)leds[idx].b * inv) >> 8;
+    // PPM stores pixels left-to-right, top-to-bottom.
+    // XY() handles the serpentine matrix layout (even rows reversed).
+    // We must use XY() so the image renders correctly on the physical matrix.
+    for (uint8_t y = 0; y < SPRITE_H; y++) {
+        for (uint8_t x = 0; x < SPRITE_W; x++) {
+            uint16_t i = y * SPRITE_W + x;
+            leds[XY(x, y)] = CRGB(rgbBuf[i*3], rgbBuf[i*3+1], rgbBuf[i*3+2]);
         }
     }
 }
@@ -154,11 +131,12 @@ static void renderFrame(CRGB* leds, uint8_t frameIdx) {
 void spriteplay(CRGB* leds) {
     if (!g_initialized) {
         loadSpriteSettings();
+        g_frameCount  = countFrames(); // sync with what's actually on SPIFFS
         g_initialized = true;
     }
 
     if (g_frameCount == 0) {
-        // No frames uploaded yet — show a placeholder pattern
+        // No frames — slow rainbow placeholder
         static uint8_t hue = 0;
         fill_solid(leds, NUM_LEDS, CHSV(hue++, 200, 60));
         FastLED.show();
@@ -166,15 +144,15 @@ void spriteplay(CRGB* leds) {
         return;
     }
 
-    static uint8_t  currentFrame = 0;
+    static uint8_t  currentFrame  = 0;
     static uint32_t lastFrameTime = 0;
 
     uint32_t now = millis();
     if (now - lastFrameTime >= g_frameDelay) {
         renderFrame(leds, currentFrame);
         FastLED.show();
-        currentFrame    = (currentFrame + 1) % g_frameCount;
-        lastFrameTime   = now;
+        currentFrame  = (currentFrame + 1) % g_frameCount;
+        lastFrameTime = now;
     }
 }
 
@@ -184,28 +162,33 @@ void spriteplay(CRGB* leds) {
 void spriteplaySetup(AsyncWebServer* server) {
     loadSpriteSettings();
 
-    if (!SPIFFS.exists("/sprites")) {
-        SPIFFS.mkdir("/sprites");
-    }
-
-    // GET /sprites — list uploaded frames as JSON
-    server->on("/sprites", HTTP_GET, [](AsyncWebServerRequest* req) {
-        String json = "{\"frames\":[";
+    // ---------------------------------------------------------------------------
+    // GET /sprites/data — frame list + settings as JSON
+    // ---------------------------------------------------------------------------
+    server->on("/sprites/data", HTTP_GET, [](AsyncWebServerRequest* req) {
+        // Rescan SPIFFS so UI always reflects reality
+        uint8_t actual = countFrames();
+        if (actual != g_frameCount) {
+            g_frameCount = actual;
+            saveSpriteSettings();
+        }
+        String json = "{\"frameCount\":" + String(g_frameCount) +
+                      ",\"delay\":"      + String(g_frameDelay) +
+                      ",\"frames\":[";
         for (uint8_t i = 0; i < g_frameCount; i++) {
             if (i) json += ",";
-            char pgmPath[32];
-            snprintf(pgmPath, sizeof(pgmPath), "/sprites/frame_%02d.pgm", i);
-            bool hasAlpha = SPIFFS.exists(pgmPath);
             json += "{\"idx\":" + String(i) +
-                    ",\"ppm\":\"/sprites/frame_" + (i < 10 ? "0" : "") + String(i) + ".ppm\"" +
-                    ",\"alpha\":" + (hasAlpha ? "true" : "false") + "}";
+                    ",\"url\":\"/sprites/frame_" +
+                    (i<10?"0":"") + String(i) + ".ppm\"}";
         }
-        json += "],\"delay\":" + String(g_frameDelay) +
-                ",\"frameCount\":" + String(g_frameCount) + "}";
+        json += "]}";
         req->send(200, "application/json", json);
     });
 
-    // POST /sprites/upload?type=ppm&frame=N  — upload a PPM or PGM file
+    // ---------------------------------------------------------------------------
+    // POST /sprites/upload?frame=N — upload one PPM file
+    // Called once per file by the multi-upload JS loop
+    // ---------------------------------------------------------------------------
     server->on("/sprites/upload", HTTP_POST,
         [](AsyncWebServerRequest* req) {
             req->send(200, "text/plain", "OK");
@@ -213,83 +196,55 @@ void spriteplaySetup(AsyncWebServer* server) {
         [](AsyncWebServerRequest* req, const String& filename,
            size_t index, uint8_t* data, size_t len, bool final)
         {
-            static File uploadFile;
+            static File  uploadFile;
             static uint8_t uploadFrame = 0;
-            static bool    uploadIsPGM = false;
 
             if (index == 0) {
-                // First chunk — open the file
-                uploadFrame = 0;
-                uploadIsPGM = false;
-                if (req->hasParam("frame"))
-                    uploadFrame = (uint8_t)req->getParam("frame")->value().toInt();
-                if (req->hasParam("type"))
-                    uploadIsPGM = (req->getParam("type")->value() == "pgm");
-
+                uploadFrame = req->hasParam("frame")
+                              ? (uint8_t)req->getParam("frame")->value().toInt()
+                              : 0;
                 char path[32];
-                snprintf(path, sizeof(path), "/sprites/frame_%02d.%s",
-                         uploadFrame, uploadIsPGM ? "pgm" : "ppm");
+                snprintf(path, sizeof(path), "/sprites/frame_%02d.ppm", uploadFrame);
                 uploadFile = SPIFFS.open(path, "w");
-                if (!uploadFile) {
-                    Serial.printf("[Sprite] Failed to open %s for write\n", path);
-                }
+                if (!uploadFile)
+                    Serial.printf("[Sprite] Failed to open %s\n", path);
+                else
+                    Serial.printf("[Sprite] Receiving frame %d → %s\n", uploadFrame, path);
             }
 
             if (uploadFile) uploadFile.write(data, len);
 
             if (final && uploadFile) {
                 uploadFile.close();
-                // Update frame count if this is a new PPM frame
-                if (!uploadIsPGM && uploadFrame >= g_frameCount) {
+                if (uploadFrame >= g_frameCount) {
                     g_frameCount = uploadFrame + 1;
                     saveSpriteSettings();
                 }
-                Serial.printf("[Sprite] Frame %d %s uploaded OK\n",
-                              uploadFrame, uploadIsPGM ? "PGM" : "PPM");
+                Serial.printf("[Sprite] Frame %d complete\n", uploadFrame);
+                // Force re-init so pattern picks up new frame immediately
+                g_initialized = false;
             }
         }
     );
 
-    // GET /sprites/delete?frame=N — delete a frame
-    server->on("/sprites/delete", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!req->hasParam("frame")) {
-            req->send(400, "text/plain", "Missing frame param");
-            return;
+    // ---------------------------------------------------------------------------
+    // GET /sprites/clear — delete all frames
+    // ---------------------------------------------------------------------------
+    server->on("/sprites/clear", HTTP_GET, [](AsyncWebServerRequest* req) {
+        for (uint8_t i = 0; i < MAX_FRAMES; i++) {
+            char path[32];
+            snprintf(path, sizeof(path), "/sprites/frame_%02d.ppm", i);
+            SPIFFS.remove(path);
         }
-        uint8_t fi = (uint8_t)req->getParam("frame")->value().toInt();
-        char ppm[32], pgm[32];
-        snprintf(ppm, sizeof(ppm), "/sprites/frame_%02d.ppm", fi);
-        snprintf(pgm, sizeof(pgm), "/sprites/frame_%02d.pgm", fi);
-        SPIFFS.remove(ppm);
-        SPIFFS.remove(pgm);
-        // Compact: renumber remaining frames
-        uint8_t dst = fi;
-        for (uint8_t src = fi + 1; src < g_frameCount; src++, dst++) {
-            char srcP[32], dstP[32], srcG[32], dstG[32];
-            snprintf(srcP, sizeof(srcP), "/sprites/frame_%02d.ppm", src);
-            snprintf(dstP, sizeof(dstP), "/sprites/frame_%02d.ppm", dst);
-            snprintf(srcG, sizeof(srcG), "/sprites/frame_%02d.pgm", src);
-            snprintf(dstG, sizeof(dstG), "/sprites/frame_%02d.pgm", dst);
-            // SPIFFS rename = copy + delete
-            File sf = SPIFFS.open(srcP, "r");
-            File df = SPIFFS.open(dstP, "w");
-            if (sf && df) { while (sf.available()) df.write(sf.read()); }
-            if (sf) sf.close(); if (df) df.close();
-            SPIFFS.remove(srcP);
-            if (SPIFFS.exists(srcG)) {
-                File sg = SPIFFS.open(srcG, "r");
-                File dg = SPIFFS.open(dstG, "w");
-                if (sg && dg) { while (sg.available()) dg.write(sg.read()); }
-                if (sg) sg.close(); if (dg) dg.close();
-                SPIFFS.remove(srcG);
-            }
-        }
-        if (g_frameCount > 0) g_frameCount--;
+        g_frameCount  = 0;
+        g_initialized = false;
         saveSpriteSettings();
-        req->send(200, "text/plain", "Deleted");
+        req->send(200, "text/plain", "Cleared");
     });
 
+    // ---------------------------------------------------------------------------
     // GET /sprites/delay?value=N — set frame delay in ms
+    // ---------------------------------------------------------------------------
     server->on("/sprites/delay", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (req->hasParam("value")) {
             g_frameDelay = (uint16_t)constrain(
@@ -299,7 +254,9 @@ void spriteplaySetup(AsyncWebServer* server) {
         req->send(200, "text/plain", "OK");
     });
 
-    // Serve the sprite management UI
+    // ---------------------------------------------------------------------------
+    // GET /sprites/ui — management page
+    // ---------------------------------------------------------------------------
     server->on("/sprites/ui", HTTP_GET, [](AsyncWebServerRequest* req) {
         String html = R"html(
 <!DOCTYPE html><html><head>
@@ -307,77 +264,153 @@ void spriteplaySetup(AsyncWebServer* server) {
 <title>Sprite Animator</title>
 <link rel="stylesheet" href="/style.css">
 <style>
-  .frame-list { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
-  .frame-card { border:1px solid #444; padding:8px; border-radius:6px; text-align:center; }
-  .frame-card canvas { display:block; margin:0 auto 4px; image-rendering:pixelated; }
+  .section{background:#282c34;border-radius:6px;padding:12px;margin-bottom:12px}
+  .section h3{margin:0 0 10px;color:#61dafb;font-size:1em}
+  .frames{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .frame-card{border:1px solid #444;border-radius:6px;padding:8px;
+              text-align:center;min-width:80px}
+  .frame-card img{display:block;width:64px;height:64px;
+                  image-rendering:pixelated;margin:0 auto 4px}
+  .drop-zone{border:2px dashed #61dafb;border-radius:8px;padding:24px;
+             text-align:center;cursor:pointer;color:#61dafb;margin:8px 0}
+  .drop-zone.over{background:#1a2a3a}
+  .btn{background:#61dafb;color:#282c34;border:none;padding:8px 20px;
+       border-radius:4px;font-weight:bold;cursor:pointer;margin:4px}
+  .btn.danger{background:#e74c3c;color:#fff}
+  .btn:disabled{background:#444;color:#666;cursor:not-allowed}
+  progress{width:100%;height:16px;border-radius:4px;margin-top:8px}
+  #status{margin-top:8px;min-height:1.4em;font-size:.9em;color:#aaa}
+  .delay-row{display:flex;align-items:center;gap:8px}
+  input[type=number]{width:70px;background:#1a1a2e;color:#fff;
+                     border:1px solid #444;padding:4px 6px;border-radius:4px}
 </style>
 </head><body>
-<h2>🖼️ Sprite Animator</h2>
+<h2>&#x1F5BC;&#xFE0F; Sprite Animator</h2>
 
-<div>
-  <label>Frame delay (ms):
-    <input type="number" id="delay" min="10" max="10000" value="100">
-    <button onclick="setDelay()">Set</button>
-  </label>
-</div><br>
+<div class="section">
+  <h3>Frame delay</h3>
+  <div class="delay-row">
+    <input type="number" id="delay" min="10" max="10000" value="150">
+    <span>ms per frame</span>
+    <button class="btn" onclick="setDelay()">Set</button>
+  </div>
+</div>
 
-<h3>Upload Frame</h3>
-<label>Frame number (0-15): <input type="number" id="upFrame" min="0" max="15" value="0"></label><br>
-<label>PPM file: <input type="file" id="ppmFile" accept=".ppm"></label>
-<button onclick="upload('ppm')">Upload PPM</button><br>
-<label>PGM alpha mask (optional): <input type="file" id="pgmFile" accept=".pgm"></label>
-<button onclick="upload('pgm')">Upload PGM</button><br><br>
+<div class="section">
+  <h3>Upload frames</h3>
+  <p style="color:#aaa;font-size:.85em;margin:0 0 8px">
+    Select multiple <code>.ppm</code> files at once. They will be sorted by
+    filename and assigned frame numbers in order. Use the naming convention
+    <code>frame_00.ppm</code>, <code>frame_01.ppm</code>, etc.
+  </p>
+  <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+    &#x1F4C2; Click or drop <code>.ppm</code> files here
+  </div>
+  <input type="file" id="fileInput" accept=".ppm" multiple style="display:none">
+  <div id="fileList" style="color:#aaa;font-size:.85em;margin:4px 0"></div>
+  <progress id="progress" value="0" max="100" style="display:none"></progress>
+  <div id="status"></div>
+  <button class="btn" id="uploadBtn" onclick="startUpload()" disabled>Upload</button>
+  <button class="btn danger" onclick="clearAll()">&#x1F5D1; Clear all frames</button>
+</div>
 
-<h3>Frames</h3>
-<div class="frame-list" id="frameList">Loading...</div>
+<div class="section">
+  <h3>Current frames (<span id="frameCountLabel">0</span>)</h3>
+  <div class="frames" id="frameList">Loading...</div>
+</div>
 
 <script>
-async function loadFrames() {
-  const r = await fetch('/sprites');
-  const d = await r.json();
-  document.getElementById('delay').value = d.delay;
-  const list = document.getElementById('frameList');
-  list.innerHTML = '';
-  d.frames.forEach(f => {
-    const card = document.createElement('div');
-    card.className = 'frame-card';
-    card.innerHTML = `<img src="${f.ppm}" width="64" height="64"
-                          style="image-rendering:pixelated"><br>
-                      Frame ${f.idx}${f.alpha ? ' ✓α' : ''}<br>
-                      <button onclick="del(${f.idx})">🗑</button>`;
-    list.appendChild(card);
-  });
+let selectedFiles = [];
+const dz = document.getElementById('dropZone');
+const fi = document.getElementById('fileInput');
+const btn = document.getElementById('uploadBtn');
+const prog = document.getElementById('progress');
+const stat = document.getElementById('status');
+
+fi.onchange = e => setFiles([...e.target.files]);
+dz.ondragover = e => { e.preventDefault(); dz.classList.add('over'); };
+dz.ondragleave = () => dz.classList.remove('over');
+dz.ondrop = e => {
+  e.preventDefault(); dz.classList.remove('over');
+  setFiles([...e.dataTransfer.files].filter(f=>f.name.endsWith('.ppm')));
+};
+
+function setFiles(files) {
+  // Sort by filename so frame_00 comes before frame_01 etc.
+  selectedFiles = files.sort((a,b) => a.name.localeCompare(b.name));
+  document.getElementById('fileList').textContent =
+    selectedFiles.length + ' file(s): ' + selectedFiles.map(f=>f.name).join(', ');
+  btn.disabled = selectedFiles.length === 0;
+  stat.textContent = '';
 }
 
-async function upload(type) {
-  const frame = document.getElementById('upFrame').value;
-  const fileInput = document.getElementById(type === 'ppm' ? 'ppmFile' : 'pgmFile');
-  if (!fileInput.files.length) { alert('Select a file first'); return; }
-  const fd = new FormData();
-  fd.append('file', fileInput.files[0]);
-  const r = await fetch(`/sprites/upload?type=${type}&frame=${frame}`, {
-    method:'POST', body: fd
-  });
-  if (r.ok) { alert('Uploaded!'); loadFrames(); }
-  else       alert('Upload failed');
+async function startUpload() {
+  if (!selectedFiles.length) return;
+  btn.disabled = true;
+  prog.style.display = 'block';
+  prog.value = 0;
+  stat.textContent = 'Uploading...';
+
+  for (let i = 0; i < selectedFiles.length; i++) {
+    const file = selectedFiles[i];
+    stat.textContent = `Uploading ${file.name} (${i+1}/${selectedFiles.length})...`;
+    prog.value = Math.round(i / selectedFiles.length * 100);
+
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await fetch(`/sprites/upload?frame=${i}`, {
+        method: 'POST', body: fd
+      });
+      if (!r.ok) throw new Error(await r.text());
+    } catch(e) {
+      stat.textContent = `Error on frame ${i}: ${e.message}`;
+      btn.disabled = false;
+      return;
+    }
+  }
+
+  prog.value = 100;
+  stat.textContent = `✅ Uploaded ${selectedFiles.length} frame(s)!`;
+  selectedFiles = [];
+  document.getElementById('fileList').textContent = '';
+  btn.disabled = true;
+  await loadFrames();
 }
 
-async function del(idx) {
-  if (!confirm(`Delete frame ${idx}?`)) return;
-  await fetch(`/sprites/delete?frame=${idx}`);
-  loadFrames();
+async function clearAll() {
+  if (!confirm('Delete all frames?')) return;
+  await fetch('/sprites/clear');
+  stat.textContent = 'All frames cleared.';
+  await loadFrames();
 }
 
 async function setDelay() {
   const v = document.getElementById('delay').value;
-  await fetch(`/sprites/delay?value=${v}`);
-  alert('Delay set to ' + v + 'ms');
+  await fetch('/sprites/delay?value=' + v);
+  stat.textContent = 'Frame delay set to ' + v + 'ms';
+}
+
+async function loadFrames() {
+  const r = await fetch('/sprites/data');
+  const d = await r.json();
+  document.getElementById('delay').value = d.delay;
+  document.getElementById('frameCountLabel').textContent = d.frameCount;
+  const list = document.getElementById('frameList');
+  if (d.frameCount === 0) {
+    list.innerHTML = '<span style="color:#666">No frames uploaded yet</span>';
+    return;
+  }
+  list.innerHTML = d.frames.map(f => `
+    <div class="frame-card">
+      <img src="${f.url}?t=${Date.now()}" alt="Frame ${f.idx}">
+      <div style="font-size:.8em;color:#aaa">Frame ${f.idx}</div>
+    </div>`).join('');
 }
 
 loadFrames();
 </script>
-</body></html>
-)html";
+</body></html>)html";
         req->send(200, "text/html", html);
     });
 }
