@@ -16,7 +16,7 @@
 #include <ESPAsyncWebServer.h>
 #include <Arduino.h>
 
-static const uint8_t  MAX_FRAMES = 16;
+static const uint8_t  MAX_FRAMES = 99;  // SPIFFS can hold ~1100 but 99 is plenty
 static const uint16_t SPRITE_W   = 16;
 static const uint16_t SPRITE_H   = 16;
 static const uint16_t PIXELS     = SPRITE_W * SPRITE_H; // 256
