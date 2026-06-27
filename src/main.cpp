@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include <FastLED.h>
 #include <led_display.h>
-#include "WifiServer.h"
+#include "PixelWifiServer.h"
 #include <Preferences.h>
 #include <patterns.h>  
 #include "SPIFFS.h"
@@ -68,7 +68,8 @@ void clearWiFiCredentials() {
 }
 
 void setup() {
-  Serial.begin(460800);
+  // Serial.begin(460800);
+  Serial.begin(115200);
   
   // Check wake-up reason
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -102,7 +103,7 @@ void setup() {
 
   // Setup WiFi and server if this is a normal boot or we need to reconnect
   if (wakeup_reason != ESP_SLEEP_WAKEUP_WIFI) {
-    wifiServerSetup();  // connect to WiFi, start server, etc.
+    pixelwifiServerSetup();  // connect to WiFi, start server, etc.
     nap(2000); // Wait for WiFi to stabilize
   }
 

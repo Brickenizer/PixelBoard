@@ -8,7 +8,9 @@
 #include "type/type.h"
 #include "snake/snake.h"
 #include "tetris/tetris.h"
-#include "clock/clock.h"  // Add new clock pattern header
+#include "clock/clock.h"
+#include "pacman/pacman.h"
+#include "sprites/spriteplay.h"
 #if ENABLE_MICROPHONE
 #include "audio/audio.h"  // Add audio pattern header
 #endif
@@ -78,7 +80,9 @@ Pattern g_patternList[] = {
     { "Random",            randomPattern,     "🎲" },
     { "Snake Game",        snake,             "🐍" },
     { "Tetris Game",       tetris,            "🧩" },
-    { "Sparkler",          sparkler,          "💫" }
+    { "Sparkler",          sparkler,          "💫" },
+    { "Pac-Man Chase",     pacman,            "👾" },
+    { "Sprite Animator",   spriteplay,        "🖼️" }
 };
 
 // And the size of that array

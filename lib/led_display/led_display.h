@@ -1,7 +1,7 @@
 #ifndef LED_DISPLAY_H
 #define LED_DISPLAY_H
 #define NUM_LEDS    256
-#define LED_TYPE    WS2811
+#define LED_TYPE    WS2812B
 #define COLOR_ORDER GRB
 extern int BRIGHTNESS;
 

@@ -1,0 +1,31 @@
+name,start_idx,frame_count,has_direction,role,score,notes
+pacman,0,4,yes,player,,"right=0-3,left=4-7,up=8-11,down=12-15"
+pacman_death,16,10,no,player,,"frames 16-25, 25=empty"
+red_ghost,26,2,yes,hunter,200,"right=26-27,left=28-29"
+pink_ghost,30,2,yes,hunter,200,"right=30-31,left=32-33"
+ltblue_ghost,34,2,yes,hunter,200,"right=34-35,left=36-37"
+orange_ghost,38,2,yes,hunter,200,"right=38-39,left=40-41"
+green_ghost,42,2,yes,hunter,200,"right=42-43,left=44-45"
+purple_ghost,46,2,yes,hunter,200,"right=46-47,left=48-49"
+blue_ghost,50,2,no,prey,200,frightened—flickers with gray_ghost
+gray_ghost,52,2,no,flicker,,never standalone
+dog,54,1,yes,unused,,
+cat,56,1,yes,unused,,
+turtle,58,1,yes,unused,,
+cat2,60,1,yes,unused,,
+chicken,62,1,yes,hunter,CLUCK,
+frog,64,1,yes,unused,,
+rabbit,66,1,yes,unused,,
+cow,68,1,yes,unused,,
+horse,70,1,yes,unused,,
+donkey,72,1,yes,unused,,
+dog2,74,1,yes,unused,,
+snake,76,1,yes,unused,,
+butterfly_both,78,2,no,prey,150,
+sheep,80,1,yes,unused,,
+ostrich,82,1,yes,unused,,
+monkey_both,84,2,no,prey,OOH,
+cherry,86,1,yes,static,100,
+apple,88,1,yes,static,200,
+beer_all,90,4,no,static,YUM,
+pikachu,95,1,yes,hunter,PIKA,
