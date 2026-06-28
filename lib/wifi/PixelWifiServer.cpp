@@ -1777,34 +1777,96 @@ static void startServer() {
 // -------------------------------------------------------------------
 // wifiServerSetup - main entry point to do WiFi + server setup
 // -------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Startup info scroll — scrolls SSID and IP address across the matrix
+// Uses the 3x5 small font, white text, for ~10 seconds total
+// ---------------------------------------------------------------------------
+void scrollStartupInfo(const String& ssid, const String& ip) {
+    // Build message: "SSID  IP"  (two spaces between)
+    String msg = ssid + "  " + ip;
+    msg.toUpperCase();
+    const char* txt = msg.c_str();
+    int len = msg.length();
+
+    // 3x5 font data (same as pacman small font)
+    static const uint8_t F3x5[][3] = {
+        {0x00,0x00,0x00},{0x00,0x17,0x00},{0x03,0x00,0x03},{0x1f,0x0a,0x1f},
+        {0x0a,0x1f,0x05},{0x13,0x08,0x19},{0x0e,0x15,0x0a},{0x00,0x03,0x00},
+        {0x00,0x0e,0x11},{0x11,0x0e,0x00},{0x0a,0x04,0x0a},{0x04,0x0e,0x04},
+        {0x10,0x08,0x00},{0x04,0x04,0x04},{0x00,0x10,0x00},{0x18,0x04,0x03},
+        {0x0e,0x11,0x0e},{0x12,0x1f,0x10},{0x19,0x15,0x12},{0x11,0x15,0x0e},
+        {0x07,0x04,0x1f},{0x17,0x15,0x09},{0x0e,0x15,0x08},{0x01,0x1d,0x03},
+        {0x0e,0x15,0x0e},{0x02,0x15,0x0e},{0x00,0x0a,0x00},{0x10,0x0a,0x00},
+        {0x04,0x0a,0x11},{0x0a,0x0a,0x0a},{0x11,0x0a,0x04},{0x01,0x15,0x02},
+        {0x0e,0x15,0x1e},{0x1e,0x05,0x1e},{0x1f,0x15,0x0e},{0x0e,0x11,0x11},
+        {0x1f,0x11,0x0e},{0x1f,0x15,0x11},{0x1f,0x05,0x01},{0x0e,0x15,0x1c},
+        {0x1f,0x04,0x1f},{0x11,0x1f,0x11},{0x08,0x10,0x0f},{0x1f,0x04,0x1b},
+        {0x1f,0x10,0x10},{0x1f,0x02,0x1f},{0x1f,0x06,0x1f},{0x0e,0x11,0x0e},
+        {0x1f,0x05,0x02},{0x0e,0x19,0x1e},{0x1f,0x05,0x1a},{0x12,0x15,0x09},
+        {0x01,0x1f,0x01},{0x0f,0x10,0x1f},{0x07,0x18,0x07},{0x1f,0x0c,0x1f},
+        {0x1b,0x04,0x1b},{0x03,0x1c,0x03},{0x19,0x15,0x13},
+    };
+    auto getCol = [&](char c, uint8_t col) -> uint8_t {
+        if (c>='a'&&c<='z') c-=32;
+        if (c=='.'||c==',') c='.';  // keep dots for IP
+        // Map '.' to a usable glyph — use the period at ASCII 46
+        uint8_t idx = (c>=32&&c<=90) ? (uint8_t)(c-32) : 0;
+        if (idx>=(uint8_t)(sizeof(F3x5)/3)||col>=3) return 0;
+        return F3x5[idx][col];
+    };
+
+    // Scroll: enter from right, exit left, ~10 seconds total
+    int msgW = len * 4 - 1;
+    int totalScroll = 16 + msgW + 16;
+    int splitPoint = msg.indexOf("  "); // where SSID ends, IP begins
+
+    // Calculate ms per frame to fill ~10 seconds
+    int frameDelay = max(30, 10000 / totalScroll);
+
+    // Non-blocking scroll — keep OTA and web server alive during startup
+    for (int scroll = 0; scroll < totalScroll; scroll++) {
+        uint32_t frameStart = millis();
+        fill_solid(leds, NUM_LEDS, CRGB::Black);
+        int x0 = 16 - scroll;
+        for (int ci = 0; ci < len; ci++) {
+            char c = txt[ci];
+            bool isIP = (splitPoint >= 0 && ci > splitPoint + 1);
+            CRGB color = isIP ? CRGB(255, 200, 50) : CRGB(0, 220, 255);
+            for (int col = 0; col < 3; col++) {
+                int px = x0 + ci*4 + col;
+                if (px < 0 || px >= 16) continue;
+                uint8_t bits = getCol(c, col);
+                for (int row = 0; row < 5; row++) {
+                    if (bits & (1<<row))
+                        leds[XY(px, 5+row)] = color;
+                }
+            }
+        }
+        FastLED.show();
+        ArduinoOTA.handle(); // keep OTA alive
+        // Busy-wait the remainder of the frame without blocking OTA
+        while ((millis() - frameStart) < (uint32_t)frameDelay) {
+            ArduinoOTA.handle();
+            delay(1);
+        }
+    }
+
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    FastLED.show();
+}
+
 void pixelwifiServerSetup() {
   // Load settings before starting server
   loadSettings();
-  
+
   // Attempt connecting or start AP if no creds
   connectToWiFi();
 
-  // If we ended up in AP mode, we're serving `onboardServer`.
-  // If we have a successful STA connection, serve normal pages:
+  // STA mode — start full server with all handlers
   if (WiFi.status() == WL_CONNECTED) {
     setupMDNS();
     setupOTA();
-    setupHomePage();
-    setupPatternHandler();
-    setupBrightnessHandler();
-    setupSpeedHandler();
-    setupVideoPlayer(&server);
-    setupDrawPattern(&server);
-    setupTypePattern(&server);
-    setupSnakePattern(&server);
-    setupTetrisPattern(&server);
-    setupClockPattern(&server);
-    pacmanSetup(&server);
-    spriteplaySetup(&server);
-#if ENABLE_MICROPHONE
-    setupAudioPattern(&server);
-#endif
-    startServer();
+    startServer();  // startServer registers all handlers internally
 
     // Debug: List files in SPIFFS
     server.on("/list", HTTP_GET, [](AsyncWebServerRequest *request) {

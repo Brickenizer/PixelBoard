@@ -16,6 +16,9 @@
 #include <ESPAsyncWebServer.h>
 #include <Arduino.h>
 
+extern CRGB leds[];
+static CRGB* g_leds = nullptr;  // set in spriteplaySetup, usable in lambdas
+
 static const uint8_t  MAX_FRAMES = 99;  // SPIFFS can hold ~1100 but 99 is plenty
 static const uint16_t SPRITE_W   = 16;
 static const uint16_t SPRITE_H   = 16;
@@ -99,6 +102,9 @@ static bool parsePPM(const char* path, uint8_t* rgbBuf) {
     return (got == PIXELS*3);
 }
 
+// Static buffer for PPM pixel data — kept global to avoid stack overflow
+static uint8_t g_rgbBuf[PIXELS * 3];
+
 // ---------------------------------------------------------------------------
 // Render one frame onto the LED array
 // ---------------------------------------------------------------------------
@@ -106,21 +112,16 @@ static void renderFrame(CRGB* leds, uint8_t frameIdx) {
     char path[32];
     snprintf(path, sizeof(path), "/sprites/frame_%02d.ppm", frameIdx);
 
-    static uint8_t rgbBuf[PIXELS * 3];
-
-    if (!parsePPM(path, rgbBuf)) {
-        fill_solid(leds, NUM_LEDS, CRGB::Black);
+    if (!parsePPM(path, g_rgbBuf)) {
+        fill_solid(g_leds, NUM_LEDS, CRGB::Black);
         leds[XY(0,0)] = CRGB::Magenta; // error indicator
         return;
     }
 
-    // PPM stores pixels left-to-right, top-to-bottom.
-    // XY() handles the serpentine matrix layout (even rows reversed).
-    // We must use XY() so the image renders correctly on the physical matrix.
     for (uint8_t y = 0; y < SPRITE_H; y++) {
         for (uint8_t x = 0; x < SPRITE_W; x++) {
             uint16_t i = y * SPRITE_W + x;
-            leds[XY(x, y)] = CRGB(rgbBuf[i*3], rgbBuf[i*3+1], rgbBuf[i*3+2]);
+            leds[XY(x, y)] = CRGB(g_rgbBuf[i*3], g_rgbBuf[i*3+1], g_rgbBuf[i*3+2]);
         }
     }
 }
@@ -131,17 +132,17 @@ static void renderFrame(CRGB* leds, uint8_t frameIdx) {
 void spriteplay(CRGB* leds) {
     if (!g_initialized) {
         loadSpriteSettings();
-        g_frameCount  = countFrames(); // sync with what's actually on SPIFFS
+        g_frameCount  = countFrames();
         g_initialized = true;
+        Serial.printf("[Sprite] init: %d frames, %dms delay\n",
+                      g_frameCount, g_frameDelay);
     }
 
     if (g_frameCount == 0) {
-        // No frames — slow rainbow placeholder
         static uint8_t hue = 0;
         fill_solid(leds, NUM_LEDS, CHSV(hue++, 200, 60));
         FastLED.show();
-        delay(50);
-        return;
+        return;  // main loop controls timing
     }
 
     static uint8_t  currentFrame  = 0;
@@ -154,12 +155,14 @@ void spriteplay(CRGB* leds) {
         currentFrame  = (currentFrame + 1) % g_frameCount;
         lastFrameTime = now;
     }
+    // No delay() — return immediately, main loop calls us again next cycle
 }
 
 // ---------------------------------------------------------------------------
 // Web endpoints
 // ---------------------------------------------------------------------------
 void spriteplaySetup(AsyncWebServer* server) {
+    g_leds = leds;  // capture LED array for use in upload lambdas
     loadSpriteSettings();
 
     // ---------------------------------------------------------------------------
@@ -188,6 +191,8 @@ void spriteplaySetup(AsyncWebServer* server) {
     // ---------------------------------------------------------------------------
     // POST /sprites/upload?frame=N — upload one PPM file
     // Called once per file by the multi-upload JS loop
+    // LEDs are blacked out during upload to reduce current draw and
+    // prevent brownout resets (WiFi + SPIFFS write + LEDs = too much current)
     // ---------------------------------------------------------------------------
     server->on("/sprites/upload", HTTP_POST,
         [](AsyncWebServerRequest* req) {
@@ -200,6 +205,10 @@ void spriteplaySetup(AsyncWebServer* server) {
             static uint8_t uploadFrame = 0;
 
             if (index == 0) {
+                // Black out LEDs to reduce current draw during upload
+                fill_solid(g_leds, NUM_LEDS, CRGB::Black);
+                FastLED.show();
+
                 uploadFrame = req->hasParam("frame")
                               ? (uint8_t)req->getParam("frame")->value().toInt()
                               : 0;
@@ -223,6 +232,9 @@ void spriteplaySetup(AsyncWebServer* server) {
                 Serial.printf("[Sprite] Frame %d complete\n", uploadFrame);
                 // Force re-init so pattern picks up new frame immediately
                 g_initialized = false;
+                // Brief dim indicator that frame landed — single green pixel
+                g_leds[XY(uploadFrame % 16, 0)] = CRGB(0, 40, 0);
+                FastLED.show();
             }
         }
     );

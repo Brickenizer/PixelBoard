@@ -101,6 +101,11 @@ void setup() {
   FastLED.setBrightness(0);
   FastLED.show();
 
+  // Mount SPIFFS early — sprite animator needs it before first pattern call
+  if (!SPIFFS.begin()) {
+    Serial.println("SPIFFS Mount Failed");
+  }
+
   // Setup WiFi and server if this is a normal boot or we need to reconnect
   if (wakeup_reason != ESP_SLEEP_WAKEUP_WIFI) {
     pixelwifiServerSetup();  // connect to WiFi, start server, etc.
@@ -110,10 +115,9 @@ void setup() {
   // Set normal brightness
   FastLED.setBrightness(g_Brightness);
 
-  // Initialize SPIFFS
-  if(!SPIFFS.begin()){
-    Serial.println("SPIFFS Mount Failed");
-    return;
+  // Scroll SSID and IP once at boot if connected
+  if (WiFi.status() == WL_CONNECTED) {
+    scrollStartupInfo(WiFi.SSID(), WiFi.localIP().toString());
   }
   
   // Check if button is pressed during boot
