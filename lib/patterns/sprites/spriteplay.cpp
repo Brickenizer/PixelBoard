@@ -17,7 +17,9 @@
 #include <Arduino.h>
 
 extern CRGB leds[];
-static CRGB* g_leds = nullptr;  // set in spriteplaySetup, usable in lambdas
+static CRGB* g_leds = nullptr;
+extern bool g_wifiActive;
+void applyBrightness();  // defined in PixelWifiServer.cpp  // set in spriteplaySetup, usable in lambdas
 
 static const uint8_t  MAX_FRAMES = 99;  // SPIFFS can hold ~1100 but 99 is plenty
 static const uint16_t SPRITE_W   = 16;
@@ -205,7 +207,9 @@ void spriteplaySetup(AsyncWebServer* server) {
             static uint8_t uploadFrame = 0;
 
             if (index == 0) {
-                // Black out LEDs to reduce current draw during upload
+                // Black out LEDs and cap brightness during upload
+                g_wifiActive = true;
+                applyBrightness();
                 fill_solid(g_leds, NUM_LEDS, CRGB::Black);
                 FastLED.show();
 
@@ -230,7 +234,9 @@ void spriteplaySetup(AsyncWebServer* server) {
                     saveSpriteSettings();
                 }
                 Serial.printf("[Sprite] Frame %d complete\n", uploadFrame);
-                // Force re-init so pattern picks up new frame immediately
+                // Restore brightness and re-init
+                g_wifiActive = false;
+                applyBrightness();
                 g_initialized = false;
                 // Brief dim indicator that frame landed — single green pixel
                 g_leds[XY(uploadFrame % 16, 0)] = CRGB(0, 40, 0);

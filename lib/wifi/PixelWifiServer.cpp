@@ -51,6 +51,18 @@ static AsyncWebServer onboardServer(80);
 // -------------------------------------------------------------------
 extern uint8_t g_current_pattern_number;   // Which pattern is selected
 extern int g_Brightness;                   // From main code
+// During WiFi-intensive operations, cap brightness to reduce current draw
+// and prevent brownout resets. 80/255 ≈ 31% — keeps LEDs visible but safe.
+static const uint8_t WIFI_SAFE_BRIGHTNESS = 80;
+bool g_wifiActive = false;  // true during connect/upload/OTA
+
+// Call this to apply the current appropriate brightness
+void applyBrightness() {
+    uint8_t b = g_wifiActive
+                ? min((uint8_t)g_Brightness, WIFI_SAFE_BRIGHTNESS)
+                : (uint8_t)g_Brightness;
+    FastLED.setBrightness(b);
+}
 extern int g_Speed;                        // From main code
 static int g_PreviewInterval = 100;        // Default 100ms for preview updates
 
@@ -246,6 +258,8 @@ static void connectToWiFi() {
   }
 
   // We have credentials — try STA mode
+  g_wifiActive = true;
+  applyBrightness();
   Serial.printf("[WiFi] Attempting to connect to SSID: %s\n", g_wifi_ssid.c_str());
   WiFi.disconnect(true);
   delay(100);
@@ -265,6 +279,8 @@ static void connectToWiFi() {
     Serial.println("[WiFi] Connected successfully!");
     Serial.print("[WiFi] IP Address: ");
     Serial.println(WiFi.localIP());
+    g_wifiActive = false;
+    applyBrightness();
   } else {
     // All attempts exhausted — fall back to AP mode so the device
     // is still reachable for reconfiguration instead of boot-looping.
@@ -290,7 +306,8 @@ static void setupOTA() {
     ArduinoOTA.onStart([]() {
         String type = (ArduinoOTA.getCommand()==U_FLASH) ? "firmware" : "filesystem";
         Serial.println("[OTA] Starting update: " + type);
-        // Clear display and show OTA indicator
+        g_wifiActive = true;
+        applyBrightness();
         fill_solid(leds, NUM_LEDS, CRGB::Black);
         // Show "OTA" in top-left using 3 bright pixels as a simple indicator
         leds[0] = CRGB::Cyan;
@@ -316,7 +333,8 @@ static void setupOTA() {
 
     ArduinoOTA.onEnd([]() {
         Serial.println("\n[OTA] Complete — rebooting");
-        // Flash full green then white to signal success
+        g_wifiActive = false;
+        FastLED.setBrightness(128); // fixed visible brightness for success flash
         fill_solid(leds, NUM_LEDS, CRGB::Green);
         FastLED.show();
         delay(300);
@@ -1595,7 +1613,8 @@ async function startUpload() {
         {
             if (index == 0) {
                 Serial.printf("[WebOTA] Receiving: %s\n", filename.c_str());
-                // Show progress bar row starting state on matrix
+                g_wifiActive = true;
+                applyBrightness();
                 fill_solid(leds, NUM_LEDS, CRGB::Black);
                 leds[XY(0,7)] = CRGB::Cyan;
                 FastLED.show();
